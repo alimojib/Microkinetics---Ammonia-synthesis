@@ -13,8 +13,7 @@ Rate constant expressions used
     beta = 0 (no T^beta factor for adsorption steps).
 
   Surface reaction steps (steps 11–13, 16–21, Arrhenius + BEP):
-    kf = A * T^beta / ABYV * exp(-Ea / (R_CAL * T))  [mol/(cm²·s) per
-         unit concentration product]
+    kf = A * T^beta * exp(-Ea / (R_CAL * T))
     with beta = 1.
     Ea(T) = alpha * dH_rxn(T) + E0   [kcal/mol]  — temperature-dependent
     through the reaction enthalpy dH_rxn(T) computed from thermodynamics.
@@ -131,6 +130,9 @@ from config import (
     X_N2_FEED,      # feed mole fraction of N2  [-]
     X_H2_FEED,      # feed mole fraction of H2  [-]
     X_NH3_FEED,     # feed mole fraction of NH3 [-]
+    USE_UNIFORM_A,  # if True, override all surface A with A_UNIFORM
+    A_UNIFORM,      # uniform pre-exponential [s⁻¹] used when USE_UNIFORM_A=True
+    EA_N_DIFF,      # N inter-site diffusion Ea [kcal/mol] (SeqSim, zero strain)
 )
 
 from thermodynamics import H_species
@@ -247,50 +249,41 @@ def compute_vacancies(y):
 # RATE CONSTANT CALCULATIONS
 # ==============================================================================
 
-def _kf_adsorption(gas_species, T):
+def _kf_adsorption(gas_species, T, dissociative=False):
     """
     Forward rate constant for one adsorption step via the Hertz-Knudsen
-    expression [cm³/(mol·s)]:
+    expression.
 
-        kf = (S / SDTOT) * sqrt(R_SI * T / (2π * MW_kg))
-             * exp(-Ea / (R_CAL * T))
+    Molecular adsorption  (N2, NH3):  rate = kf × C_gas × vac
+        kf = (S / SDTOT) × v_thermal          [cm³/(mol·s)]
 
-    where:
-        S          = STICKING_COEFF (dimensionless probability)
-        SDTOT      = total site density [mol/cm²]
-        R_SI       = 8.314 J/(mol·K)
-        MW_kg      = molecular weight [kg/mol]  (MW[g/mol] / 1000)
-        Ea         = 0 kcal/mol (no adsorption barrier)
+    Dissociative adsorption (H2→2H):  rate = kf × C_gas × vac²
+        kf = (S / SDTOT²) × v_thermal         [cm⁵/(mol²·s)]
 
-    The sqrt gives units of m/s = 100 cm/s; after unit conversions the
-    result is in cm³/(mol·s).
+    The extra 1/SDTOT for dissociative steps keeps the rate in mol/(cm²·s)
+    when the second surface site is multiplied in as vac [mol/cm²].
+    This matches Code 3's convention (Stick / (abyv × SDTOT²) × v_thermal)
+    after accounting for Code 3 storing surface concentrations in mol/cm³.
 
     Parameters
     ----------
-    gas_species : str   — "N2", "H2", or "NH3"
-    T           : float — temperature [K]
-
-    Returns
-    -------
-    float — kf in cm³/(mol·s)
+    gas_species   : str   — "N2", "H2", or "NH3"
+    T             : float — temperature [K]
+    dissociative  : bool  — True for H2+2*→2H (second-order in vacancies)
     """
-    MW_kg = MW[gas_species] / 1000.0   # convert g/mol → kg/mol
+    MW_kg = MW[gas_species] / 1000.0   # g/mol → kg/mol
 
-    # Mean thermal speed factor from kinetic theory [m/s]
-    thermal_velocity_ms = math.sqrt(R_SI * T / (2.0 * math.pi * MW_kg))
-
-    # Convert thermal velocity from m/s → cm/s (×100)
+    thermal_velocity_ms  = math.sqrt(R_SI * T / (2.0 * math.pi * MW_kg))
     thermal_velocity_cms = thermal_velocity_ms * 100.0
 
-    # Arrhenius factor — always 1.0 here since EA_ADS = 0
     arrhenius = math.exp(-EA_ADS * 1000.0 / (R_CAL * T))
-    # Note: Ea is in kcal/mol; R_CAL is in cal/(mol·K).
-    # Multiplying Ea by 1000 converts kcal → cal so units match.
 
-    # Hertz-Knudsen kf [cm³/(mol·s)]
-    # Dividing by SDTOT [mol/cm²] gives cm³/(mol·s) when multiplied by
-    # the thermal velocity [cm/s] × sticking coefficient [-].
     kf = (STICKING_COEFF / SDTOT) * thermal_velocity_cms * arrhenius
+
+    # For dissociative adsorption the rate expression has vac² [mol/cm²]²;
+    # one extra 1/SDTOT restores the correct mol/(cm²·s) dimensions.
+    if dissociative:
+        kf /= SDTOT
 
     return kf
 
@@ -298,12 +291,10 @@ def _kf_adsorption(gas_species, T):
 def _kf_surface_reaction(step_label, T, dH_rxn_kcal, kin_params):
     """
     Forward rate constant for a surface reaction step via Arrhenius
-    with a BEP-derived activation energy [mol/(cm²·s) per unit
-    concentration product]:
+    with a BEP-derived activation energy:
 
         Ea(T)  = alpha * dH_rxn(T) + E0       [kcal/mol]
-        kf     = A * T^beta / ABYV
-                 * exp(-Ea(T) * 1000 / (R_CAL * T))
+        kf     = A * T^beta * exp(-Ea(T) * 1000 / (R_CAL * T))
 
     where beta = 1 (as decided) and A = alpha_1 from the Excel sheet.
 
@@ -332,7 +323,12 @@ def _kf_surface_reaction(step_label, T, dH_rxn_kcal, kin_params):
 
     alpha = params["alpha"]
     E0    = params["E0"]      # kcal/mol
-    A     = params["A"]       # pre-exponential, 1/s
+    A     = params["A"]       # pre-exponential, 1/s (from Excel)
+
+    # Override with the uniform value when the comparison flag is set.
+    # The Excel-derived A is still available in params["A"] at any time.
+    if USE_UNIFORM_A:
+        A = A_UNIFORM
 
     # If A is None (parsing failed) or effectively zero, short-circuit
     if A is None or A == 0.0:
@@ -349,7 +345,7 @@ def _kf_surface_reaction(step_label, T, dH_rxn_kcal, kin_params):
 
     # Arrhenius pre-exponential × T^beta (beta = 1)
     beta = 1
-    prefactor = A * (T ** beta) / ABYV
+    prefactor = A * (T ** beta)
 
     # Full rate constant
     kf = prefactor * math.exp(-Ea_cal / (R_CAL * T))
@@ -358,7 +354,8 @@ def _kf_surface_reaction(step_label, T, dH_rxn_kcal, kin_params):
 
 
 def compute_rate_constants(T, step_Keq_T, kin_params,
-                           nasa_gas, surf_data, cp_poly, steps):
+                           nasa_gas, surf_data, cp_poly, steps,
+                           nasa_surf=None):
     """
     Compute the forward (kf) and backward (kb) rate constants for all
     22 elementary steps at a single temperature T.
@@ -398,10 +395,10 @@ def compute_rate_constants(T, step_Keq_T, kin_params,
     # ── Indices of the 6 adsorption steps ─────────────────────────────────────
     # These are the first 6 steps in STEPS; ordered as:
     #   0: N2+*(T)<=>N2(T)
-    #   1: H2+2*(T)<=>2H(T)
+    #   1: H2+2*(T)<=>2H(T)   ← dissociative
     #   2: NH3+*(T)<=>NH3(T)
     #   3: N2+*(S)<=>N2(S)
-    #   4: H2+2*(S)<=>2H(S)
+    #   4: H2+2*(S)<=>2H(S)   ← dissociative
     #   5: NH3+*(S)<=>NH3(S)
     ADSORPTION_STEP_INDICES = [0, 1, 2, 3, 4, 5]
 
@@ -415,10 +412,20 @@ def compute_rate_constants(T, step_Keq_T, kin_params,
         5: "NH3",
     }
 
-    # ── Indices of diffusion/transfer steps (A = 0) ───────────────────────────
-    # Steps 6–10 are the terrace↔step transfer reactions.
-    # Steps 14–15 are the cross-site N2 dissociation and N(SL) transfer.
-    # All are deactivated: kf = 0.
+    # H2 adsorption steps are dissociative (H2 + 2* → 2H*); their kf needs
+    # an extra 1/SDTOT so the rate kf×C_H2×vac² stays in mol/(cm²·s).
+    DISSOCIATIVE_STEP_INDICES = {1, 4}
+
+    # ── Inter-site diffusion steps: fixed-Ea Arrhenius (SeqSim parameters) ──────
+    # Ea values from SequentialSimulation.py at zero strain.
+    # A = A_UNIFORM = 1.56e19 for all diffusion steps (same as SeqSim).
+    # kf [cm²/(mol·s)] = A × T × exp(-Ea×1000 / (R_CAL×T))
+    # (ABYV factor cancels vs SeqSim convention where species are in mol/cm³.)
+    # Step 10 (H diffusion) and step 14 (cross-site N2 dissociation) remain
+    # inactive — they are commented out / set to zero in SeqSim as well.
+    DIFFUSION_STEP_EA = {}
+
+    # All diffusion/transfer steps remain inactive
     ZERO_RATE_STEP_INDICES = {6, 7, 8, 9, 10, 14, 15}
 
     for i, step in enumerate(steps):
@@ -426,25 +433,55 @@ def compute_rate_constants(T, step_Keq_T, kin_params,
         # ── Adsorption steps: Hertz-Knudsen ───────────────────────────────────
         if i in ADSORPTION_STEP_INDICES:
             gas_sp  = ADSORPTION_GAS_SPECIES[i]
-            kf_val  = _kf_adsorption(gas_sp, T)
+            kf_val  = _kf_adsorption(gas_sp, T,
+                                     dissociative=(i in DISSOCIATIVE_STEP_INDICES))
 
         # ── Diffusion/transfer steps: zero rate ───────────────────────────────
         elif i in ZERO_RATE_STEP_INDICES:
             kf_val = 0.0
+
+        # ── Inter-site diffusion steps: fixed-Ea Arrhenius ────────────────────
+        elif i in DIFFUSION_STEP_EA:
+            Ea_cal = DIFFUSION_STEP_EA[i] * 1000.0   # kcal/mol → cal/mol
+            kf_val = A_UNIFORM * (T ** 1) * math.exp(-Ea_cal / (R_CAL * T))
 
         # ── Surface reaction steps: Arrhenius + BEP ───────────────────────────
         else:
             # Compute the reaction enthalpy ΔH at temperature T.
             # This makes the BEP activation energy temperature-dependent.
             dH_rxn_kcal = _compute_dH_rxn(step.species, T,
-                                           nasa_gas, surf_data, cp_poly)
+                                           nasa_gas, surf_data, cp_poly,
+                                           nasa_surf)
 
             kf_val = _kf_surface_reaction(step.label, T,
                                           dH_rxn_kcal, kin_params)
 
-        # ── Backward rate: kb = kf / Keq ──────────────────────────────────────
-        # Guard against Keq = 0 or near-zero (would cause division by zero).
-        keq_val = step_Keq_T[i]
+        # ── Backward rate: kb = kf / Kc ───────────────────────────────────────
+        # step_Keq_T[i] is Kp — the dimensionless thermodynamic equilibrium
+        # constant (activities: P/P° for gas, θ for surface, P° = 1 bar).
+        #
+        # For adsorption steps the rate expression mixes gas concentrations
+        # [mol/cm³] with surface concentrations [mol/cm²].  In this mixed
+        # unit system the concentration-based equilibrium constant Kc carries
+        # units of cm³/mol, and Kp must be converted:
+        #
+        #   Kc = Kp × R·T / P°   [cm³/mol]   (P° = 1 bar, standard state)
+        #
+        # For pure surface steps every species lives in mol/cm², so the units
+        # cancel and Kc = Kp (dimensionless) — no correction needed.
+        #
+        # Without this correction kb = kf/Kp is too large by a factor R·T/P°
+        # ≈ 49 300 cm³/mol at 593 K, making desorption ~49 000× too fast and
+        # suppressing adsorbed-H coverage by ~√(49 000) ≈ 220×.  Three
+        # consecutive hydrogenation steps each requiring H(T) then compound
+        # the error to ~220³ ≈ 10⁷ — explaining the observed TOF discrepancy.
+        keq_val = step_Keq_T[i]   # Kp (dimensionless)
+
+        if i in ADSORPTION_STEP_INDICES:
+            # Convert Kp → Kc for the mixed gas/surface unit system.
+            # R_CM3_BAR × T has units cm³·bar/mol; dividing by P° = 1 bar
+            # gives cm³/mol, which is the correct unit for Kc here.
+            keq_val = keq_val * R_CM3_BAR * T   # Kc [cm³/mol]
 
         if keq_val > 0.0 and kf_val > 0.0:
             kb_val = kf_val / keq_val
@@ -457,7 +494,7 @@ def compute_rate_constants(T, step_Keq_T, kin_params,
     return kf_arr, kb_arr
 
 
-def _compute_dH_rxn(sp_list, T, nasa_gas, surf_data, cp_poly):
+def _compute_dH_rxn(sp_list, T, nasa_gas, surf_data, cp_poly, nasa_surf=None):
     """
     Compute ΔH_rxn [kcal/mol] for a single elementary step at
     temperature T using the unified H_species dispatcher from
@@ -472,13 +509,14 @@ def _compute_dH_rxn(sp_list, T, nasa_gas, surf_data, cp_poly):
     nasa_gas  : dict
     surf_data : dict
     cp_poly   : dict
+    nasa_surf : dict|None — when provided, surface species H is from NASA-7
 
     Returns
     -------
     float — ΔH in kcal/mol
     """
     dH = sum(
-        nu * H_species(sp, T, nasa_gas, surf_data, cp_poly)
+        nu * H_species(sp, T, nasa_gas, surf_data, cp_poly, nasa_surf)
         for nu, sp in sp_list
     )
     return dH
@@ -801,6 +839,7 @@ def odes_rhs(t, y, kf_arr, kb_arr, C_feed):
     #   (desorption is handled by the backward rates in rnet)
 
     # d[N2]/dt
+    # r0, r3 are in mol/(cm²·s); ×ABYV converts to mol/(cm³·s) to match C_gas units.
     dydt[IDX_N2G] = (
         ((-r0) + (-r3)) * ABYV          # reaction: adsorption removes N2
         + tau_inv * C_N2_feed            # inlet: N2 flowing in
@@ -835,7 +874,8 @@ def odes_rhs(t, y, kf_arr, kb_arr, C_feed):
 # ==============================================================================
 
 def precompute_kinetics(T_arr, step_Keq, kin_params,
-                        nasa_gas, surf_data, cp_poly, steps):
+                        nasa_gas, surf_data, cp_poly, steps,
+                        nasa_surf=None):
     """
     Compute kf and kb for every elementary step at every temperature in
     T_arr and store the results in two 2-D matrices.
@@ -906,6 +946,7 @@ def precompute_kinetics(T_arr, step_Keq, kin_params,
         kf_arr, kb_arr = compute_rate_constants(
             T, step_Keq_at_T, kin_params,
             nasa_gas, surf_data, cp_poly, steps,
+            nasa_surf,
         )
 
         # Store the row for this temperature
@@ -918,6 +959,57 @@ def precompute_kinetics(T_arr, step_Keq, kin_params,
 # ==============================================================================
 # INITIAL CONDITIONS
 # ==============================================================================
+
+def _enforce_min_vacancy(y0, min_vac_frac=0.1):
+    """
+    Rescale surface coverages so each site type retains at least min_vac_frac
+    (default 10 %) vacant sites.
+
+    When the ODE steady state is strongly N-poisoned, the warm-start carries
+    θ_N ≈ 99% into the next temperature step.  With virtually no free sites
+    available, the hydrogenation steps (N+H→NH) are starved of co-reactant
+    and the solver takes extremely long to escape the poisoned state.
+
+    Capping occupation at 1 - min_vac_frac (90%) by proportionally scaling
+    all adsorbates on each site type is the minimal perturbation that restores
+    enough vacant sites for the chemistry to proceed without introducing
+    thermodynamic inconsistencies.
+
+    Site type groupings
+    -------------------
+    Terrace (T) : N2(T), H(T), NH3(T), N(T), NH(T), NH2(T)   →  capacity SDEN_T
+    Step (S+SL) : N2(S), H(S), NH3(S), N(S), NH(S), NH2(S),
+                  N(SL)                                         →  capacity SDEN_S
+
+    Parameters
+    ----------
+    y0           : np.ndarray — state vector (modified in-place and returned)
+    min_vac_frac : float      — minimum vacant-site fraction [0, 1)
+
+    Returns
+    -------
+    y0 : np.ndarray — same array, modified in-place
+    """
+    _TERRACE_IDX = [IDX_N2T, IDX_HT, IDX_NH3T, IDX_NT, IDX_NHT, IDX_NH2T]
+    _STEP_IDX    = [IDX_N2S, IDX_HS, IDX_NH3S, IDX_NS, IDX_NHS, IDX_NH2S,
+                    IDX_NSL]
+
+    max_occ_T = (1.0 - min_vac_frac) * SDEN_T
+    max_occ_S = (1.0 - min_vac_frac) * SDEN_S
+
+    occ_T = sum(y0[i] for i in _TERRACE_IDX)
+    if occ_T > max_occ_T > 0:
+        scale = max_occ_T / occ_T
+        for i in _TERRACE_IDX:
+            y0[i] *= scale
+
+    occ_S = sum(y0[i] for i in _STEP_IDX)
+    if occ_S > max_occ_S > 0:
+        scale = max_occ_S / occ_S
+        for i in _STEP_IDX:
+            y0[i] *= scale
+
+    return y0
 
 def build_initial_conditions(T):
     """
@@ -1052,9 +1144,13 @@ def build_equilibrated_initial_conditions(T, kf_arr, kb_arr):
     theta_NH3T = min(n_NH3T / denom_T, 1.0)
 
     # Convert dimensionless coverage to mol/cm²
-    # H2 dissociates → 2H(T), so H coverage is 2 × H2 fractional coverage
+    # H2 dissociates → 2H(T), so H coverage is 2 × H2 fractional coverage.
+    # Cap HT at SDEN_T: the Langmuir formula (molecular, not dissociative) can
+    # yield 2×theta_H2T = 2 when theta_H2T → 1 at low T, giving y0[HT] = 2×SDEN_T
+    # which violates the site balance and forces vac_T to EPS_VAC from t=0,
+    # stalling the ODE for >> T_SPAN seconds while H slowly desorbs.
     y0[IDX_N2T]  = theta_N2T  * SDEN_T
-    y0[IDX_HT]   = 2.0 * theta_H2T  * SDEN_T   # dissociative: H2 → 2H
+    y0[IDX_HT]   = min(2.0 * theta_H2T * SDEN_T, SDEN_T)
     y0[IDX_NH3T] = theta_NH3T * SDEN_T
 
     # ── Langmuir pre-equilibration for step sites (steps 3, 4, 5) ────────────
@@ -1073,9 +1169,10 @@ def build_equilibrated_initial_conditions(T, kf_arr, kb_arr):
     theta_NH3S = min(n_NH3S / denom_S, 1.0)
 
     y0[IDX_N2S]  = theta_N2S  * SDEN_S
-    y0[IDX_HS]   = 2.0 * theta_H2S  * SDEN_S   # dissociative: H2 → 2H
+    y0[IDX_HS]   = min(2.0 * theta_H2S * SDEN_S, SDEN_S)   # cap at site capacity
     y0[IDX_NH3S] = theta_NH3S * SDEN_S
 
+    _enforce_min_vacancy(y0)
     return y0
 
 
@@ -1139,6 +1236,7 @@ def build_warm_start(y_prev, T_next):
         if y0[idx] < 0.0:
             y0[idx] = 0.0
 
+    _enforce_min_vacancy(y0)
     return y0
 
 

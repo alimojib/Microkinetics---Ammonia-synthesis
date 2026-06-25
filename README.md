@@ -175,7 +175,9 @@ where:
 - M_w = molecular weight in kg/mol
 - Eₐ = 0 kcal/mol (no adsorption barrier assumed)
 
-$$k_b^{\text{ads}} = \frac{k_f^{\text{ads}}}{K_{\text{eq}}}$$
+$$k_b^{\text{ads}} = \frac{k_f^{\text{ads}}}{K_c}, \qquad K_c = K_p \cdot \frac{R\,T}{P^\circ} \quad \left[\frac{\text{cm}^3}{\text{mol}}\right]$$
+
+where $P^\circ = 1\,\text{bar}$ is the thermodynamic standard state and $R = 83.14\,\text{cm}^3\!\cdot\!\text{bar}/(\text{mol}\!\cdot\!\text{K})$.  The factor $R T / P^\circ \approx 49{,}300\,\text{cm}^3/\text{mol}$ at 593 K converts the dimensionless pressure-based $K_p$ into the concentration-based $K_c$ required by the mixed gas/surface rate expressions (see [Key Design Decisions](#key-design-decisions)).
 
 **Surface reaction steps (11–13, 16–21) — Arrhenius + BEP:**
 
@@ -412,3 +414,21 @@ A hard `max(vac, 0)` creates a kink (non-differentiability) in the ODE right-han
 
 **Why log-residuals for the Keq linear-combination check?**
 Not used here — the check is a simple linear algebra solve (A·ν = b) that directly verifies whether the elementary steps combine to give N₂ + 3H₂ → 2NH₃. The residual max|Aν − b| should be ≈ 10⁻¹⁴ (machine precision) for a thermodynamically consistent dataset.
+
+**Why does kb for adsorption steps use Kc instead of Kp?**
+`compute_step_keq` returns $K_p$ — the dimensionless thermodynamic equilibrium constant expressed in terms of activities ($P/P^\circ$ for gas species, fractional coverage $\theta$ for surface species, standard state $P^\circ = 1\,\text{bar}$).
+
+For **pure surface steps** (e.g. N₂(T) + \*(T) ⇌ 2N(T)) every species lives in the same surface units (mol/cm²), so the concentration-based $K_c$ is also dimensionless and equals $K_p$ — no correction is needed.
+
+For **adsorption steps** (e.g. N₂ + \*(T) ⇌ N₂(T)) the rate expression mixes a gas concentration $[\text{N}_2]$ in mol/cm³ with a surface concentration $[\text{vac\_T}]$ in mol/cm².  Writing out the concentration-based equilibrium constant:
+
+$$K_c = \frac{[\text{N}_2(\text{T})]\,[\text{mol/cm}^2]}{[\text{N}_2]\,[\text{mol/cm}^3]\;\cdot\;[\text{vac\_T}]\,[\text{mol/cm}^2]} = \frac{\text{cm}^3}{\text{mol}}$$
+
+Because $K_p$ is dimensionless but $K_c$ carries units of cm³/mol, they are related through the molar volume of an ideal gas at standard state:
+
+$$K_c = K_p \cdot \frac{R\,T}{P^\circ}$$
+
+Omitting this conversion makes $k_b = k_f / K_p$ too large by a factor $R T / P^\circ \approx 49{,}300\,\text{cm}^3/\text{mol}$ at 593 K.  In practice:
+- Molecular adsorption (N₂, NH₃): surface coverage of the adsorbed intermediate is underestimated by $\approx 49{,}000\times$.
+- Dissociative adsorption (H₂ → 2H\*): because the reverse rate involves H\*², the coverage error is $\sqrt{49{,}000} \approx 220\times$.
+- With three consecutive hydrogenation steps each requiring H(T), the TOF error compounds to $\approx 220^3 \approx 10^7$, explaining the ~6–7 order of magnitude TOF discrepancy observed before this fix.
