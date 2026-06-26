@@ -132,7 +132,10 @@ from config import (
     X_NH3_FEED,     # feed mole fraction of NH3 [-]
     USE_UNIFORM_A,  # if True, override all surface A with A_UNIFORM
     A_UNIFORM,      # uniform pre-exponential [s⁻¹] used when USE_UNIFORM_A=True
-    EA_N_DIFF,      # N inter-site diffusion Ea [kcal/mol] (SeqSim, zero strain)
+    EA_N_DIFF,      # N   inter-site diffusion Ea [kcal/mol] (SeqSim, zero strain)
+    EA_NH_DIFF,     # NH  inter-site diffusion Ea [kcal/mol]
+    EA_NH2_DIFF,    # NH2 inter-site diffusion Ea [kcal/mol]
+    EA_NH3_DIFF,    # NH3 inter-site diffusion Ea [kcal/mol]
 )
 
 from thermodynamics import H_species
@@ -418,15 +421,25 @@ def compute_rate_constants(T, step_Keq_T, kin_params,
 
     # ── Inter-site diffusion steps: fixed-Ea Arrhenius (SeqSim parameters) ──────
     # Ea values from SequentialSimulation.py at zero strain.
-    # A = A_UNIFORM = 1.56e19 for all diffusion steps (same as SeqSim).
+    # A = A_UNIFORM = 1.56e19 for all active diffusion steps (same as SeqSim).
     # kf [cm²/(mol·s)] = A × T × exp(-Ea×1000 / (R_CAL×T))
     # (ABYV factor cancels vs SeqSim convention where species are in mol/cm³.)
-    # Step 10 (H diffusion) and step 14 (cross-site N2 dissociation) remain
-    # inactive — they are commented out / set to zero in SeqSim as well.
-    DIFFUSION_STEP_EA = {}
+    # Step 10 (H diffusion) — inactive in SeqSim (step 15 commented out).
+    # Step 13 (N2(S)+*(S)<=>2N(S)) — explicitly zeroed in SeqSim (step 8 off).
+    # Step 14 (cross-site N2 dissociation) — inactive in both codes.
+    DIFFUSION_STEP_EA = {
+        6:  EA_N_DIFF,     # N(T)+*(S)  <=> N(S)+*(T)   — SeqSim step 14
+        7:  EA_NH_DIFF,    # NH(T)+*(S) <=> NH(S)+*(T)  — SeqSim step 18
+        8:  EA_NH2_DIFF,   # NH2(T)+*(S)<=> NH2(S)+*(T) — SeqSim step 17
+        9:  EA_NH3_DIFF,   # NH3(T)+*(S)<=> NH3(S)+*(T) — SeqSim step 16
+        15: EA_N_DIFF,     # N(T)+*(SL) <=> N(SL)+*(T)  — SeqSim step 21
+    }
 
-    # All diffusion/transfer steps remain inactive
-    ZERO_RATE_STEP_INDICES = {6, 7, 8, 9, 10, 14, 15}
+    # Steps kept at kf = 0 to match SeqSim:
+    #   10 — H diffusion (SeqSim step 15 off)
+    #   13 — N2(S)+*(S)<=>2N(S) (SeqSim step 8 off)
+    #   14 — cross-site N2 dissociation (inactive in both)
+    ZERO_RATE_STEP_INDICES = {10, 13, 14}
 
     for i, step in enumerate(steps):
 
@@ -784,8 +797,9 @@ def odes_rhs(t, y, kf_arr, kb_arr, C_feed):
     #                step 10: H(T)+*(S)⇌H(S)+*(T)
     dydt[IDX_HT]   = (+2*r1) + (-r16) + (-r17) + (-r18) + (+r10)
 
-    # d[NH3(T)]/dt — step 2: NH3+*(T)⇌NH3(T);  step 18: NH2(T)+H(T)⇌NH3(T)+*(T)
-    dydt[IDX_NH3T] = (+r2) + (+r18)
+    # d[NH3(T)]/dt — step 2: NH3+*(T)⇌NH3(T);  step 18: NH2(T)+H(T)⇌NH3(T)+*(T);
+    #                step 9: NH3(T)+*(S)⇌NH3(S)+*(T) (transfer away from terrace)
+    dydt[IDX_NH3T] = (+r2) + (+r18) + (-r9)
 
     # d[N(T)]/dt   — step 11: N2(T)+*(T)⇌2N(T);  step 14: N2(S)+*(T)⇌N(S)+N(T);
     #                step 6: N(T)+*(S)⇌N(S)+*(T);  step 15: N(T)+*(SL)⇌N(SL)+*(T);
@@ -794,11 +808,11 @@ def odes_rhs(t, y, kf_arr, kb_arr, C_feed):
 
     # d[NH(T)]/dt  — step 16: N(T)+H(T)⇌NH(T)+*(T);
     #                step 7: NH(T)+*(S)⇌NH(S)+*(T);  step 17: NH(T)+H(T)⇌NH2(T)+*(T)
-    dydt[IDX_NHT]  = (+r16) + (-r7) + (+r7) + (-r17)
+    dydt[IDX_NHT]  = (+r16) + (-r7) + (-r17)
 
     # d[NH2(T)]/dt — step 17: NH(T)+H(T)⇌NH2(T)+*(T);
     #                step 8: NH2(T)+*(S)⇌NH2(S)+*(T);  step 18: NH2(T)+H(T)⇌NH3(T)+*(T)
-    dydt[IDX_NH2T] = (+r17) + (-r8) + (+r8) + (-r18)
+    dydt[IDX_NH2T] = (+r17) + (-r8) + (-r18)
 
     # d[N2(S)]/dt  — step 3: N2+*(S)⇌N2(S);
     #                steps 12,13,14: N2(S) dissociation pathways
@@ -808,23 +822,24 @@ def odes_rhs(t, y, kf_arr, kb_arr, C_feed):
     #                steps 19,20,21: step hydrogenation consumes H(S)
     dydt[IDX_HS]   = (+2*r4) + (-r10) + (-r19) + (-r20) + (-r21)
 
-    # d[NH3(S)]/dt — step 5: NH3+*(S)⇌NH3(S);  step 21: NH2(S)+H(S)⇌NH3(S)+*(S)
-    dydt[IDX_NH3S] = (+r5) + (+r21)
+    # d[NH3(S)]/dt — step 5: NH3+*(S)⇌NH3(S);  step 21: NH2(S)+H(S)⇌NH3(S)+*(S);
+    #                step 9: NH3(T)+*(S)⇌NH3(S)+*(T) (transfer in from terrace)
+    dydt[IDX_NH3S] = (+r5) + (+r21) + (+r9)
 
     # d[N(S)]/dt   — steps 6,12,13,14: produce N(S);  step 19: N(S)+H(S)⇌NH(S)+*(S)
     dydt[IDX_NS]   = (+r6) + (+r12) + (+r13) + (+r14) + (-r19)
 
     # d[NH(S)]/dt  — step 7: NH(T)+*(S)⇌NH(S)+*(T);
     #                step 19: N(S)+H(S)⇌NH(S)+*(S);  step 20: NH(S)+H(S)⇌NH2(S)+*(S)
-    dydt[IDX_NHS]  = (-r7) + (+r7) + (+r19) + (-r20)
+    dydt[IDX_NHS]  = (+r7) + (+r19) + (-r20)
 
     # d[NH2(S)]/dt — step 8: NH2(T)+*(S)⇌NH2(S)+*(T);
     #                step 20: NH(S)+H(S)⇌NH2(S)+*(S);  step 21: NH2(S)+H(S)⇌NH3(S)+*(S)
-    dydt[IDX_NH2S] = (-r8) + (+r8) + (+r20) + (-r21)
+    dydt[IDX_NH2S] = (+r8) + (+r20) + (-r21)
 
     # d[N(SL)]/dt  — step 12: N2(S)+*(SL)⇌N(S)+N(SL);
     #                step 15: N(T)+*(SL)⇌N(SL)+*(T)
-    dydt[IDX_NSL]  = (+r12) + (+r15) + (-r15)
+    dydt[IDX_NSL]  = (+r12) + (+r15)
 
     # ── Gas-phase species ODEs — CSTR balance ─────────────────────────────────
     #

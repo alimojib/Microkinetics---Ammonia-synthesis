@@ -18,6 +18,7 @@ Public API
 
 import numpy as np
 import matplotlib.pyplot as plt
+plt.close('all')
 
 from thermodynamics import nasa_Cp
 from config import (
@@ -27,6 +28,7 @@ from config import (
     FIG_TOF_PATH,
     FIG_COVERAGE_PATH,
     FIG_RATES_PATH,
+    FIG_SS_TIME_PATH,
     SDEN_T,
     SDEN_S,
 )
@@ -88,18 +90,18 @@ def plot_cp_fits(
 
         # Scatter: the 15 DFT-derived Cp values at the tabulated temperatures
         ax.scatter(
-            T_CP, surf_data[name]["Cp"],
+            T_CP - 273.15, surf_data[name]["Cp"],
             color="black", s=25, zorder=5, label="DFT data",
         )
 
         # Line: degree-3 polynomial fit on the dense temperature grid
         ax.plot(
-            T_plot, cp_poly[name](T_plot),
+            T_plot - 273.15, cp_poly[name](T_plot),
             color="royalblue", lw=2, label="Poly-3 fit",
         )
 
         ax.set_title(name, fontsize=10)
-        ax.set_xlabel("T (K)", fontsize=8)
+        ax.set_xlabel("T (°C)", fontsize=8)
         ax.set_ylabel("Cp (cal/mol/K)", fontsize=8)
         ax.tick_params(labelsize=7)
         ax.legend(fontsize=7)
@@ -110,9 +112,9 @@ def plot_cp_fits(
         ax      = axes_flat[len(all_surf) + jdx]
         cp_nasa = np.array([nasa_Cp(gname, T, nasa_gas) for T in T_plot])
 
-        ax.plot(T_plot, cp_nasa, color="crimson", lw=2, label="NASA poly")
+        ax.plot(T_plot - 273.15, cp_nasa, color="crimson", lw=2, label="NASA poly")
         ax.set_title(f"{gname} (gas)", fontsize=10)
-        ax.set_xlabel("T (K)", fontsize=8)
+        ax.set_xlabel("T (°C)", fontsize=8)
         ax.set_ylabel("Cp (cal/mol/K)", fontsize=8)
         ax.tick_params(labelsize=7)
         ax.legend(fontsize=7)
@@ -134,21 +136,29 @@ def plot_elementary_keq(
     steps,
     step_Keq,
     T_arr,
+    thermo_label="NASA-7 (Excel)",
+    step_Keq_seqsim=None,
     save_path=FIG_KEQSTEP_PATH,
 ):
     """
     Multi-panel figure of Keq(T) for every elementary step.
 
     Colour coding:
-        Royal blue — active step (participates in overall Keq solve)
-        Silver     — excluded step (terrace N2 dissociation, ν = 0)
+        Royal blue    — active step (main thermodynamic source)
+        Silver        — excluded step (ν = 0)
+        Dashed orange — same step from data_ammonia.csv (SeqSim), only when
+                        the main source differs (step_Keq_seqsim is not None)
 
     Parameters
     ----------
-    steps     : list[Step]       — from kinetics.STEPS
-    step_Keq  : list[np.ndarray] — from thermodynamics.compute_step_keq()
-    T_arr     : np.ndarray       — temperature array in K
-    save_path : str              — output file path (default from config)
+    steps            : list[Step]            — from kinetics.STEPS
+    step_Keq         : list[np.ndarray]      — from thermodynamics.compute_step_keq()
+    T_arr            : np.ndarray            — temperature array in K
+    thermo_label     : str                   — label for the main trace (shown in legend)
+    step_Keq_seqsim  : list[np.ndarray] or None
+                        Keq from SeqSim (data_ammonia.csv), same step order.
+                        When provided, a dashed orange trace is overlaid on each panel.
+    save_path        : str                   — output file path (default from config)
     """
     n_steps = len(steps)
     n_cols  = 4
@@ -160,7 +170,7 @@ def plot_elementary_keq(
         constrained_layout=True,
     )
     fig.suptitle(
-        "Keq(T) for each elementary step",
+        f"Keq(T) for each elementary step  —  {thermo_label}",
         fontsize=14,
         fontweight="bold",
     )
@@ -172,9 +182,17 @@ def plot_elementary_keq(
         color = "royalblue" if step.active else "silver"
         tag   = "[active]" if step.active else "[excluded — ν=0]"
 
-        ax.semilogy(T_arr, step_Keq[idx], color=color, lw=2)
+        ax.semilogy(T_arr - 273.15, step_Keq[idx],
+                    color=color, lw=2, label=thermo_label)
+
+        if step_Keq_seqsim is not None:
+            ax.semilogy(T_arr - 273.15, step_Keq_seqsim[idx],
+                        color="darkorange", lw=1.5, linestyle="--",
+                        label="SeqSim (CSV)")
+            ax.legend(fontsize=6, loc="best")
+
         ax.set_title(f"{step.label}\n{tag}", fontsize=7.5)
-        ax.set_xlabel("T (K)", fontsize=8)
+        ax.set_xlabel("T (°C)", fontsize=8)
         ax.set_ylabel("Keq", fontsize=8)
         ax.tick_params(labelsize=7)
         ax.grid(True, alpha=0.3, which="both")
@@ -195,33 +213,46 @@ def plot_overall_keq(
     T_arr,
     Keq_overall,
     Keq_lit,
+    thermo_label="NASA-7 (Excel)",
+    Keq_overall_seqsim=None,
     save_path=FIG_KEQOV_PATH,
 ):
     """
     Single-panel comparison of the DFT-derived overall Keq(T) against the
-    Temkin–Pyzhev literature value.
+    Temkin–Pyzhev literature value, with an optional third trace from
+    the SeqSim (data_ammonia.csv) thermodynamics.
 
     Parameters
     ----------
-    T_arr       : np.ndarray — temperature array in K
-    Keq_overall : np.ndarray — from kinetics.compute_overall_keq()
-    Keq_lit     : np.ndarray — literature Keq from kinetics.K_lit()
-    save_path   : str        — output file path (default from config)
+    T_arr              : np.ndarray      — temperature array in K
+    Keq_overall        : np.ndarray      — from kinetics.compute_overall_keq()
+    Keq_lit            : np.ndarray      — literature Keq from kinetics.K_lit()
+    thermo_label       : str             — label for the main trace
+    Keq_overall_seqsim : np.ndarray or None
+                          Overall Keq from SeqSim (data_ammonia.csv).
+                          When provided, plotted as a dashed orange line.
+    save_path          : str             — output file path (default from config)
     """
     fig, ax = plt.subplots(figsize=(8, 5))
 
     ax.semilogy(
-        T_arr, Keq_overall,
+        T_arr - 273.15, Keq_overall,
         color="royalblue", lw=2.5,
-        label="DFT overall $K_{eq}$",
+        label=f"Overall $K_{{eq}}$ — {thermo_label}",
     )
     ax.semilogy(
-        T_arr, Keq_lit,
+        T_arr - 273.15, Keq_lit,
         color="crimson", lw=2.5, linestyle="--",
         label="$K_{lit}$(T)",
     )
+    if Keq_overall_seqsim is not None:
+        ax.semilogy(
+            T_arr - 273.15, Keq_overall_seqsim,
+            color="darkorange", lw=2.0, linestyle=":",
+            label="SeqSim $K_{eq}$ (CSV)",
+        )
 
-    ax.set_xlabel("Temperature (K)", fontsize=12)
+    ax.set_xlabel("Temperature (°C)", fontsize=12)
     ax.set_ylabel("$K_{eq}$", fontsize=12)
     ax.set_title(
         "Overall $K_{eq}$: N$_2$ + 3H$_2$ $\\rightleftharpoons$ 2NH$_3$\n"
@@ -243,50 +274,80 @@ def plot_overall_keq(
 def plot_tof(
     T_arr,
     tof_arr,
+    t_stop_arr=None,
+    ss_reached_arr=None,
     save_path=FIG_TOF_PATH,
 ):
     """
-    Single-panel semilog plot of the NH3 production TOF vs temperature.
-
-    TOF definition used
-    -------------------
-    TOF [mol NH3 / (mol_site · s)] = (r_net_step2 + r_net_step5) * ABYV / SDTOT
-
-    where:
-        r_net_step2  = net rate of NH3(T) → NH3 (terrace desorption, step 2)
-        r_net_step5  = net rate of NH3(S) → NH3 (step   desorption, step 5)
-        ABYV         = catalyst area / reactor volume  [cm²/cm³]
-        SDTOT        = total site density              [mol/cm²]
-
-    The net rates are negative when NH3 adsorbs and positive when it
-    desorbs; TOF is taken as the NH3-production (desorption) direction,
-    so a positive TOF means net NH3 production.
+    Two-panel figure: TOF vs temperature (top) and time-to-steady-state vs
+    temperature (bottom).  The bottom panel is only drawn when t_stop_arr is
+    provided.
 
     Parameters
     ----------
-    T_arr   : np.ndarray — temperature array [K], shape (n_temps,)
-    tof_arr : np.ndarray — TOF at each temperature [mol NH3/(mol_site·s)],
-                           shape (n_temps,).  Computed in main.py.
-    save_path : str      — output file path (default from config)
+    T_arr         : np.ndarray — temperature array [K]
+    tof_arr       : np.ndarray — TOF [mol NH3/(mol_site·s)]
+    t_stop_arr    : np.ndarray or None — simulated seconds when ODE stopped
+    ss_reached_arr: np.ndarray(bool) or None — True where SS event fired
+    save_path     : str
     """
-    fig, ax = plt.subplots(figsize=(8, 5))
+    have_timing = t_stop_arr is not None and ss_reached_arr is not None
 
-    # Use semilogy so the wide dynamic range of TOF is readable.
-    # np.abs is applied first so that semilogy does not choke on any
-    # near-zero or transiently negative values at the cold end.
-    ax.semilogy(
-        T_arr, np.abs(tof_arr),
-        color="royalblue", lw=2.5,
-    )
+    if have_timing:
+        fig, (ax_tof, ax_t) = plt.subplots(
+            2, 1, figsize=(8, 8), sharex=True,
+            gridspec_kw={"height_ratios": [3, 2]},
+        )
+    else:
+        fig, ax_tof = plt.subplots(figsize=(8, 5))
 
-    ax.set_xlabel("Temperature (K)", fontsize=12)
-    ax.set_ylabel("TOF  [mol NH$_3$ / (mol$_{site}$ · s)]", fontsize=12)
-    ax.set_title(
+    T_C = T_arr - 273.15   # convert to °C for all TOF plot axes
+
+    # ── Top panel: TOF ────────────────────────────────────────────────────────
+    ax_tof.semilogy(T_C, np.abs(tof_arr), color="royalblue", lw=2.5)
+    ax_tof.set_ylabel("TOF  [mol NH$_3$ / (mol$_{site}$ · s)]", fontsize=12)
+    ax_tof.set_title(
         "Turnover Frequency — NH$_3$ production\n"
-        "TOF = $(r_{net,2} + r_{net,5}) \\times$ ABYV / SDTOT",
+        "TOF = $(r_{net,2} + r_{net,5})$ / SDTOT",
         fontsize=12,
     )
-    ax.grid(True, alpha=0.3, which="both")
+    ax_tof.grid(True, alpha=0.3, which="both")
+
+    if have_timing:
+        # Mark temperatures where SS was NOT reached (timed out)
+        timeout_mask = ~ss_reached_arr
+        if timeout_mask.any():
+            ax_tof.semilogy(
+                T_C[timeout_mask], np.abs(tof_arr[timeout_mask]),
+                "rv", ms=7, zorder=5, label="timeout (not true SS)",
+            )
+            ax_tof.legend(fontsize=10)
+
+    # ── Bottom panel: time to steady state ───────────────────────────────────
+    if have_timing:
+        ss_mask = ss_reached_arr
+        to_mask = ~ss_reached_arr
+
+        if ss_mask.any():
+            ax_t.semilogy(
+                T_C[ss_mask], t_stop_arr[ss_mask],
+                "o-", color="seagreen", lw=2, ms=4,
+                label="SS reached",
+            )
+        if to_mask.any():
+            ax_t.semilogy(
+                T_C[to_mask], t_stop_arr[to_mask],
+                "rv", ms=7, zorder=5,
+                label="timeout",
+            )
+
+        ax_t.set_xlabel("Temperature (°C)", fontsize=12)
+        ax_t.set_ylabel("$t_{stop}$  [s]", fontsize=12)
+        ax_t.set_title("Simulated time to steady state", fontsize=11)
+        ax_t.legend(fontsize=10)
+        ax_t.grid(True, alpha=0.3, which="both")
+    else:
+        ax_tof.set_xlabel("Temperature (°C)", fontsize=12)
 
     fig.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -405,54 +466,116 @@ def plot_surface_coverage(
     STYLE_TERRACE = dict(lw=2.0, linestyle="-")
     STYLE_STEP    = dict(lw=2.0, linestyle="--")
 
+    T_C = T_arr - 273.15   # convert to °C for all coverage plot axes
+
     # ── Panel 0 — θ_H ─────────────────────────────────────────────────────────
     ax = axes[0]
-    ax.semilogy(T_arr, np.clip(theta_HT, 1e-20, None),
+    ax.semilogy(T_C, np.clip(theta_HT, 1e-20, None),
                 color="steelblue",   label=r"$\theta_H$(T)",   **STYLE_TERRACE)
-    ax.semilogy(T_arr, np.clip(theta_HS, 1e-20, None),
+    ax.semilogy(T_C, np.clip(theta_HS, 1e-20, None),
                 color="darkorange",  label=r"$\theta_H$(S)",   **STYLE_STEP)
     ax.set_title(r"$\theta_H$ — Hydrogen coverage", fontsize=11)
-    ax.set_xlabel("Temperature (K)", fontsize=10)
+    ax.set_xlabel("Temperature (°C)", fontsize=10)
     ax.set_ylabel(r"$\theta$  (dimensionless)", fontsize=10)
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3, which="both")
 
     # ── Panel 1 — θ_N ─────────────────────────────────────────────────────────
     ax = axes[1]
-    ax.semilogy(T_arr, np.clip(theta_NT, 1e-20, None),
+    ax.semilogy(T_C, np.clip(theta_NT, 1e-20, None),
                 color="steelblue",   label=r"$\theta_N$(T)",   **STYLE_TERRACE)
-    ax.semilogy(T_arr, np.clip(theta_NS, 1e-20, None),
+    ax.semilogy(T_C, np.clip(theta_NS, 1e-20, None),
                 color="darkorange",  label=r"$\theta_N$(S)",   **STYLE_STEP)
     ax.set_title(r"$\theta_N$ — Nitrogen coverage", fontsize=11)
-    ax.set_xlabel("Temperature (K)", fontsize=10)
+    ax.set_xlabel("Temperature (°C)", fontsize=10)
     ax.set_ylabel(r"$\theta$  (dimensionless)", fontsize=10)
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3, which="both")
 
     # ── Panel 2 — θ_NH3 ───────────────────────────────────────────────────────
     ax = axes[2]
-    ax.semilogy(T_arr, np.clip(theta_NH3T, 1e-20, None),
+    ax.semilogy(T_C, np.clip(theta_NH3T, 1e-20, None),
                 color="steelblue",   label=r"$\theta_{NH_3}$(T)", **STYLE_TERRACE)
-    ax.semilogy(T_arr, np.clip(theta_NH3S, 1e-20, None),
+    ax.semilogy(T_C, np.clip(theta_NH3S, 1e-20, None),
                 color="darkorange",  label=r"$\theta_{NH_3}$(S)", **STYLE_STEP)
     ax.set_title(r"$\theta_{NH_3}$ — Ammonia coverage", fontsize=11)
-    ax.set_xlabel("Temperature (K)", fontsize=10)
+    ax.set_xlabel("Temperature (°C)", fontsize=10)
     ax.set_ylabel(r"$\theta$  (dimensionless)", fontsize=10)
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3, which="both")
 
     # ── Panel 3 — θ_vac ───────────────────────────────────────────────────────
     ax = axes[3]
-    ax.semilogy(T_arr, np.clip(theta_vac_T, 1e-20, None),
+    ax.semilogy(T_C, np.clip(theta_vac_T, 1e-20, None),
                 color="steelblue",   label=r"$\theta_{vac}$(T)", **STYLE_TERRACE)
-    ax.semilogy(T_arr, np.clip(theta_vac_S, 1e-20, None),
+    ax.semilogy(T_C, np.clip(theta_vac_S, 1e-20, None),
                 color="darkorange",  label=r"$\theta_{vac}$(S)", **STYLE_STEP)
     ax.set_title(r"$\theta_{vac}$ — Vacant sites", fontsize=11)
-    ax.set_xlabel("Temperature (K)", fontsize=10)
+    ax.set_xlabel("Temperature (°C)", fontsize=10)
     ax.set_ylabel(r"$\theta$  (dimensionless)", fontsize=10)
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3, which="both")
 
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.show()
+
+
+# ==============================================================================
+# FIGURE 5b — TIME TO STEADY STATE VS TEMPERATURE
+# ==============================================================================
+
+def plot_ss_time(
+    T_arr,
+    t_stop_arr,
+    ss_reached_arr,
+    save_path=FIG_SS_TIME_PATH,
+):
+    """
+    Single-panel semilog plot of the simulated time at which the ODE stopped
+    for each temperature, colour-coded by whether the steady-state event fired
+    (green circles) or the integration hit the maximum time limit (red triangles).
+
+    Parameters
+    ----------
+    T_arr          : np.ndarray      — temperature array [K]
+    t_stop_arr     : np.ndarray      — t at which solve_ivp stopped [s]
+    ss_reached_arr : np.ndarray(bool)— True where SS event fired
+    save_path      : str
+    """
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    ss_mask = ss_reached_arr
+    to_mask = ~ss_reached_arr
+
+    T_C = T_arr - 273.15
+
+    if ss_mask.any():
+        ax.semilogy(
+            T_C[ss_mask], t_stop_arr[ss_mask],
+            "o-", color="seagreen", lw=2, ms=5,
+            label="Steady state reached",
+        )
+    if to_mask.any():
+        ax.semilogy(
+            T_C[to_mask], t_stop_arr[to_mask],
+            "rv", ms=8, zorder=5,
+            label="Timeout — not true SS",
+        )
+
+    n_ss  = ss_mask.sum()
+    n_to  = to_mask.sum()
+    ax.set_xlabel("Temperature (°C)", fontsize=12)
+    ax.set_ylabel("Simulated time $t_{stop}$  [s]", fontsize=12)
+    ax.set_title(
+        f"Time to steady state per temperature point\n"
+        f"SS event: {n_ss}/{len(T_arr)} points  |  "
+        f"Timeout: {n_to}/{len(T_arr)} points",
+        fontsize=12,
+    )
+    ax.legend(fontsize=11)
+    ax.grid(True, alpha=0.3, which="both")
+
+    fig.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.show()
 
@@ -528,6 +651,8 @@ def plot_reaction_rates(
 
     axes_flat = axes.flatten()
 
+    T_C = T_arr - 273.15   # convert to °C for all reaction-rate plot axes
+
     # Small floor applied before semilogy to guard against exact zeros.
     # 1e-60 is far below any physically meaningful rate and prevents
     # log(0) errors without distorting the visible part of the plot.
@@ -552,7 +677,7 @@ def plot_reaction_rates(
 
         # ── Forward rate ──────────────────────────────────────────────────────
         ax.semilogy(
-            T_arr,
+            T_C,
             np.clip(rf_j, RATE_FLOOR, None),
             color     = "steelblue",
             lw        = 1.8,
@@ -562,7 +687,7 @@ def plot_reaction_rates(
 
         # ── Backward rate ─────────────────────────────────────────────────────
         ax.semilogy(
-            T_arr,
+            T_C,
             np.clip(rb_j, RATE_FLOOR, None),
             color     = "crimson",
             lw        = 1.8,
@@ -574,7 +699,7 @@ def plot_reaction_rates(
         # np.abs is applied so semilogy never receives a negative value.
         # The direction is communicated by linestyle and the title tag instead.
         ax.semilogy(
-            T_arr,
+            T_C,
             np.clip(np.abs(rnet_j), RATE_FLOOR, None),
             color     = "black",
             lw        = 2.0,
@@ -590,7 +715,7 @@ def plot_reaction_rates(
             fontsize=7.0,
         )
 
-        ax.set_xlabel("T (K)", fontsize=8)
+        ax.set_xlabel("T (°C)", fontsize=8)
         ax.set_ylabel("Rate  [mol/(cm²·s)]", fontsize=7)
         ax.tick_params(labelsize=7)
         ax.legend(fontsize=6.5, loc="best")

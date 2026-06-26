@@ -22,6 +22,17 @@ import numpy as np
 # Update this string to point to the file on your machine.
 EXCEL_PATH = r"C:\Users\AliMojibpour\Downloads\sciadv.abl6576_dataset_file.xlsx"
 
+# Path to the SeqSim thermodynamic CSV dataset.
+# Used when USE_CSV_THERMO = True (see below).
+CSV_PATH = "data_ammonia.csv"
+
+# When True, load NASA-7 gas and surface coefficients from data_ammonia.csv
+# (SeqSim dataset) instead of from the Excel file.  The zero-strain LSR
+# corrections embedded in the CSV are applied automatically so the resulting
+# coefficients match what SeqSim uses at strain=0.
+# Set to False to revert to the Excel (sciadv) dataset.
+USE_CSV_THERMO = True
+
 # Output paths for the three equilibrium figures
 FIG_CP_PATH      = "cp_fits.png"
 FIG_KEQSTEP_PATH = "keq_elementary.png"
@@ -32,6 +43,7 @@ FIG_MICROKIN_PATH     = "microkinetics.png"
 FIG_TOF_PATH          = "tof.png"
 FIG_COVERAGE_PATH     = "surface_coverage.png"
 FIG_RATES_PATH        = "reaction_rates.png"
+FIG_SS_TIME_PATH      = "ss_time.png"
 
 
 # ==============================================================================
@@ -61,7 +73,7 @@ P_BAR = 50.0
 # Covers the industrially relevant 573–873 K window at 5 K (≈ 5°C) increments.
 # np.arange is used instead of linspace so the step size is exact.
 # +1 on the stop ensures 873 K is included (arange stop is exclusive).
-T_ARR = np.arange(573, 873 + 1, 5, dtype=float)
+T_ARR = np.arange(573, 823 + 1, 5, dtype=float)
 
 # Tabulated Cp temperature points used in the Excel dataset [K]
 # These are the 15 fixed points at which DFT-derived Cp values are reported.
@@ -116,6 +128,24 @@ SDEN_S = RATIO_S * SDTOT            # mol/cm²
 
 
 # ==============================================================================
+# MICROKINETICS — PRE-EXPONENTIAL FACTOR OVERRIDE
+# ==============================================================================
+
+# Set USE_UNIFORM_A = True  to use a single A for all surface reactions
+#     (matching Code 3 / SequentialSimulation.py, useful for direct comparison).
+# Set USE_UNIFORM_A = False to use the reaction-specific A values read from the
+#     Excel file (the physically derived values — default).
+#
+# The Excel-derived A values are always loaded; this flag only controls whether
+# they are applied or replaced at runtime.
+USE_UNIFORM_A = False
+
+# Pre-exponential factor used when USE_UNIFORM_A = True [s⁻¹].
+# Value taken from Code 3 (SequentialSimulation.py, Params.A = 1.56e19).
+A_UNIFORM = 1.56e19
+
+
+# ==============================================================================
 # MICROKINETICS — HERTZ-KNUDSEN ADSORPTION PARAMETERS
 # ==============================================================================
 
@@ -129,6 +159,14 @@ STICKING_COEFF = 0.5
 # Assumed to be zero for all physisorption/chemisorption adsorption steps —
 # i.e., no barrier to adsorption (the incoming molecule is not activated).
 EA_ADS = 0.0   # kcal/mol
+
+# Activation energies for inter-site diffusion steps [kcal/mol].
+# Source: SequentialSimulation.py (SeqSim), at zero strain.
+# Formula in SeqSim: Ea = strain_coeff * (strain*100) + E0; values below are E0.
+EA_N_DIFF   = 20.20056   # steps 6 & 15 — N(T)<=>N(S)+*(T) / N(T)<=>N(SL)+*(T)
+EA_NH_DIFF  = 15.03512   # step  7      — NH(T)+*(S)<=>NH(S)+*(T)
+EA_NH2_DIFF =  5.34992   # step  8      — NH2(T)+*(S)<=>NH2(S)+*(T)
+EA_NH3_DIFF = 13.18263   # step  9      — NH3(T)+*(S)<=>NH3(S)+*(T)
 
 # Molecular weights of the three gas-phase species [g/mol].
 # Used in the Hertz-Knudsen expression: kf ∝ 1/sqrt(MW).
@@ -149,8 +187,9 @@ T_SPAN = (0.0, 1.0e6)   # seconds
 
 # Maximum ODE solver step size [s].
 # A smaller value increases accuracy but also computation time.
-# None lets the solver choose adaptively.
-ODE_MAX_STEP = np.inf
+# Capped at 1e3 s to prevent the Radau solver from stepping over fast
+# transients when the surface is in a N-poisoned state at high temperature.
+ODE_MAX_STEP = 1e3
 
 # ODE solver method.
 # "Radau" is an implicit Runge-Kutta method specifically designed for stiff
@@ -171,7 +210,9 @@ ODE_RTOL = 1.0e-8
 # accepts steps that corrupt the surface state entirely.
 # The solution is a per-variable vector passed directly to solve_ivp.
 # These two constants are combined into the vector inside run_microkinetics().
-ODE_ATOL_SURF = 1.0e-30   # mol/cm²  — for all 13 surface coverage variables
+ODE_ATOL_SURF = 1.0e-27   # mol/cm²  — for all 13 surface coverage variables
+# Was 1e-30; relaxed ×1000 after surface kf ×ABYV change so atol stays well
+# below SS_TOL and doesn't falsely stall the solver on tiny residuals.
 ODE_ATOL_GAS  = 1.0e-18   # mol/cm³  — for all 3 gas-phase concentration variables
 
 # Minimum allowed vacant-site concentration [mol/cm²].
@@ -183,10 +224,15 @@ ODE_ATOL_GAS  = 1.0e-18   # mol/cm³  — for all 3 gas-phase concentration vari
 EPS_VAC = 1.0e-30   # mol/cm²
 
 # Steady-state detection tolerance [mol/(cm²·s) and mol/(cm³·s)].
-# Lowered from 1e-20 to 1e-25 because at 50 bar the gas-phase dy/dt is
-# ~50× larger than at 1 bar even at genuine steady state, so the previous
-# threshold was firing too early (before true steady state was reached).
-SS_TOL = 1.0e-25   # mol/(cm²·s) or mol/(cm³·s)
+# Raised to 1e-10 for two compounding reasons:
+#   1. Surface kf ×ABYV change made rates ~1200× larger → SS residual dy/dt
+#      is proportionally larger than the original 1e-25 calibration.
+#   2. H2 dissociative kf = Stick/SDTOT² gives large rf ≈ rb at true SS;
+#      machine-arithmetic cancellation leaves a residual ~2×ε_mach×rf of
+#      ~1e-15 to 1e-13 mol/cm²·s at high temperature (low H coverage).
+#      SS_TOL must exceed this floor or the event never fires even when the
+#      system is at genuine physical steady state.
+SS_TOL = 1.0e-13   # mol/(cm²·s) or mol/(cm³·s)
 
 
 # ==============================================================================

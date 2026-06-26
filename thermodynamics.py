@@ -294,22 +294,26 @@ def _S_surf(name, T, surf_data, cp_poly):
 # UNIFIED H AND S DISPATCHERS
 # ==============================================================================
 
-def H_species(name, T, nasa_gas, surf_data, cp_poly):
+def H_species(name, T, nasa_gas, surf_data, cp_poly, nasa_surf=None):
     """
     Return H(T) [kcal/mol] for any species by routing to the correct
     data source:
 
-        Gas-phase species  → NASA polynomial (nasa_H)
-        Surface species    → Cp integration  (_H_surf)
+        Gas-phase species  → NASA polynomial (nasa_H, from nasa_gas)
+        Surface species    → NASA polynomial (nasa_H, from nasa_surf) if provided,
+                             otherwise Cp integration (_H_surf)
         Vacant site        → 0.0             (reference state)
 
     Parameters
     ----------
-    name      : str   — species identifier
-    T         : float — temperature in K
-    nasa_gas  : dict  — from data_io.read_nasa_data()
-    surf_data : dict  — from data_io.read_surface_data()
-    cp_poly   : dict  — from fit_surface_cp_polynomials()
+    name      : str        — species identifier
+    T         : float      — temperature in K
+    nasa_gas  : dict       — from data_io.read_nasa_data()
+    surf_data : dict       — from data_io.read_surface_data()
+    cp_poly   : dict       — from fit_surface_cp_polynomials()
+    nasa_surf : dict|None  — from data_io.read_nasa_surface_data(); when provided
+                             surface species use NASA-7 coefficients directly
+                             (correct a6/a7) instead of Cp integration
 
     Returns
     -------
@@ -322,6 +326,9 @@ def H_species(name, T, nasa_gas, surf_data, cp_poly):
     if name in nasa_gas:
         return nasa_H(name, T, nasa_gas)
 
+    elif nasa_surf is not None and name in nasa_surf:
+        return nasa_H(name, T, nasa_surf)   # reuse nasa_H — same dict structure
+
     elif name in surf_data:
         return _H_surf(name, T, surf_data, cp_poly)
 
@@ -332,22 +339,25 @@ def H_species(name, T, nasa_gas, surf_data, cp_poly):
         raise ValueError(f"H_species: unrecognised species '{name}'")
 
 
-def S_species(name, T, nasa_gas, surf_data, cp_poly):
+def S_species(name, T, nasa_gas, surf_data, cp_poly, nasa_surf=None):
     """
     Return S(T) [cal/(mol·K)] for any species by routing to the correct
     data source:
 
-        Gas-phase species  → NASA polynomial (nasa_S)
-        Surface species    → Cp/T integration (_S_surf)
+        Gas-phase species  → NASA polynomial (nasa_S, from nasa_gas)
+        Surface species    → NASA polynomial (nasa_S, from nasa_surf) if provided,
+                             otherwise Cp/T integration (_S_surf)
         Vacant site        → 0.0              (reference state)
 
     Parameters
     ----------
-    name      : str   — species identifier
-    T         : float — temperature in K
-    nasa_gas  : dict  — from data_io.read_nasa_data()
-    surf_data : dict  — from data_io.read_surface_data()
-    cp_poly   : dict  — from fit_surface_cp_polynomials()
+    name      : str        — species identifier
+    T         : float      — temperature in K
+    nasa_gas  : dict       — from data_io.read_nasa_data()
+    surf_data : dict       — from data_io.read_surface_data()
+    cp_poly   : dict       — from fit_surface_cp_polynomials()
+    nasa_surf : dict|None  — from data_io.read_nasa_surface_data(); when provided
+                             surface species use NASA-7 coefficients directly
 
     Returns
     -------
@@ -359,6 +369,9 @@ def S_species(name, T, nasa_gas, surf_data, cp_poly):
     """
     if name in nasa_gas:
         return nasa_S(name, T, nasa_gas)
+
+    elif nasa_surf is not None and name in nasa_surf:
+        return nasa_S(name, T, nasa_surf)   # reuse nasa_S — same dict structure
 
     elif name in surf_data:
         return _S_surf(name, T, surf_data, cp_poly)
@@ -374,7 +387,7 @@ def S_species(name, T, nasa_gas, surf_data, cp_poly):
 # ELEMENTARY STEP Keq COMPUTATION
 # ==============================================================================
 
-def _delta_rxn(sp_list, T, thermo_fn, nasa_gas, surf_data, cp_poly):
+def _delta_rxn(sp_list, T, thermo_fn, nasa_gas, surf_data, cp_poly, nasa_surf=None):
     """
     Compute the reaction change of a thermodynamic quantity for one
     elementary step at temperature T:
@@ -389,18 +402,19 @@ def _delta_rxn(sp_list, T, thermo_fn, nasa_gas, surf_data, cp_poly):
     nasa_gas  : dict
     surf_data : dict
     cp_poly   : dict
+    nasa_surf : dict|None
 
     Returns
     -------
     float
     """
     return sum(
-        nu * thermo_fn(sp, T, nasa_gas, surf_data, cp_poly)
+        nu * thermo_fn(sp, T, nasa_gas, surf_data, cp_poly, nasa_surf)
         for nu, sp in sp_list
     )
 
 
-def compute_step_keq(steps, T_arr, nasa_gas, surf_data, cp_poly):
+def compute_step_keq(steps, T_arr, nasa_gas, surf_data, cp_poly, nasa_surf=None):
     """
     Pre-compute Keq(T) for every elementary step over the temperature array.
 
@@ -416,6 +430,9 @@ def compute_step_keq(steps, T_arr, nasa_gas, surf_data, cp_poly):
     nasa_gas  : dict         — from data_io.read_nasa_data()
     surf_data : dict         — from data_io.read_surface_data()
     cp_poly   : dict         — from fit_surface_cp_polynomials()
+    nasa_surf : dict|None    — from data_io.read_nasa_surface_data(); when provided
+                               surface species use NASA-7 a6/a7 directly instead
+                               of Cp integration (corrects entropy reference state)
 
     Returns
     -------
@@ -428,8 +445,10 @@ def compute_step_keq(steps, T_arr, nasa_gas, surf_data, cp_poly):
         keq_vals = []
 
         for T in T_arr:
-            dH = _delta_rxn(step.species, T, H_species, nasa_gas, surf_data, cp_poly)
-            dS = _delta_rxn(step.species, T, S_species, nasa_gas, surf_data, cp_poly)
+            dH = _delta_rxn(step.species, T, H_species,
+                             nasa_gas, surf_data, cp_poly, nasa_surf)
+            dS = _delta_rxn(step.species, T, S_species,
+                             nasa_gas, surf_data, cp_poly, nasa_surf)
 
             # Convert ΔH from kcal/mol to cal/mol before computing ΔG
             dG = dH * 1000.0 - T * dS   # cal/mol

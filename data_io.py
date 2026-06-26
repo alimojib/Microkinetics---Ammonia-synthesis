@@ -20,6 +20,8 @@ Public API
     read_kinetic_params(excel_path) -> dict
 """
 
+import csv as _csv_mod
+
 import pandas as pd
 import numpy as np
 
@@ -175,6 +177,174 @@ _EXCEL_LABEL_TO_STEP_LABEL = {
     "NH2(S) + H(S) D NH3(S) + *(S)" : "NH2(S)+H(S)<=>NH3(S)+*(S)",
     "N2(S) + *(SL) D N(S) + N(SL)"  : "N2(S)+*(SL)<=>N(S)+N(SL)",
 }
+
+
+def read_nasa_surface_data(excel_path):
+    """
+    Read the 'NASA Polynomials-0% Strain' sheet and return piecewise NASA-7
+    coefficients for all 13 surface species.
+
+    All surface species use T_break = 500 K (low: 100-500 K, high: 500-1500 K).
+    Transition-state rows are skipped.
+
+    Row layout in the sheet (zero-indexed):
+         9 : N2(T)  low     10 : N2(T)  high
+        11 : N(T)   low     12 : N(T)   high
+        13 : H(T)   low     14 : H(T)   high
+        15 : NH3(T) low     16 : NH3(T) high
+        17 : NH2(T) low     18 : NH2(T) high
+        19 : NH(T)  low     20 : NH(T)  high
+        (rows 21-28: transition states — skipped)
+        29 : N2(S)  low     30 : N2(S)  high
+        31 : N(S)   low     32 : N(S)   high
+        33 : N(SL)  low     34 : N(SL)  high
+        35 : H(S)   low     36 : H(S)   high
+        37 : NH3(S) low     38 : NH3(S) high
+        39 : NH2(S) low     40 : NH2(S) high
+        41 : NH(S)  low     42 : NH(S)  high
+
+    Parameters
+    ----------
+    excel_path : str — path to the Excel file
+
+    Returns
+    -------
+    dict
+        Keys   : species name (str)
+        Values : dict with keys
+                    "low"     (np.ndarray shape (7,)) — low-T coefficients
+                    "high"    (np.ndarray shape (7,)) — high-T coefficients
+                    "T_break" (float, K = 500.0)
+    """
+    raw = pd.read_excel(
+        excel_path,
+        sheet_name="NASA Polynomials-0% Strain",
+        header=None,
+    )
+
+    _SURF_ROWS = {
+        "N2(T)":  ( 9, 10),
+        "N(T)":   (11, 12),
+        "H(T)":   (13, 14),
+        "NH3(T)": (15, 16),
+        "NH2(T)": (17, 18),
+        "NH(T)":  (19, 20),
+        "N2(S)":  (29, 30),
+        "N(S)":   (31, 32),
+        "N(SL)":  (33, 34),
+        "H(S)":   (35, 36),
+        "NH3(S)": (37, 38),
+        "NH2(S)": (39, 40),
+        "NH(S)":  (41, 42),
+    }
+
+    nasa_surf = {}
+    for name, (row_low, row_high) in _SURF_ROWS.items():
+        nasa_surf[name] = {
+            "low":     _read_nasa_row(raw, row_low),
+            "high":    _read_nasa_row(raw, row_high),
+            "T_break": 500.0,
+        }
+
+    return nasa_surf
+
+
+def read_nasa_from_csv(csv_path):
+    """
+    Read NASA-7 polynomial coefficients from data_ammonia.csv and return
+    (nasa_gas, nasa_surf) in the same dict format as read_nasa_data() and
+    read_nasa_surface_data().
+
+    The CSV stores raw coefficients that SeqSim adjusts at runtime via
+    Strain_Coef_H and Strain_Coef_S (LSR + strain corrections).  At zero
+    strain and Q_target = Q_ref (pure Ru reference), the corrections reduce to
+    a constant offset on a6 and a7 for each surface species.  This function
+    applies those offsets once so the returned dicts are ready for direct use
+    in nasa_H / nasa_S — no further correction needed at call time.
+
+    Parameters
+    ----------
+    csv_path : str — path to data_ammonia.csv
+
+    Returns
+    -------
+    nasa_gas  : dict  — same structure as read_nasa_data()
+    nasa_surf : dict  — same structure as read_nasa_surface_data()
+    """
+    # ── Parse CSV into sections ────────────────────────────────────────────────
+    data = {}
+    with open(csv_path, mode='r') as f:
+        reader = _csv_mod.reader(f)
+        section = None
+        rows = []
+        for row in reader:
+            row = [v.strip() for v in row]
+            if not any(row):
+                continue
+            if len(row) == 1:
+                if section and rows:
+                    arr = np.array(rows, dtype=float)
+                    data[section] = arr.flatten() if arr.shape[0] == 1 else arr
+                    rows = []
+                section = row[0]
+            elif section:
+                try:
+                    rows.append([float(v) for v in row])
+                except ValueError:
+                    pass
+        if section and rows:
+            arr = np.array(rows, dtype=float)
+            data[section] = arr.flatten() if arr.shape[0] == 1 else arr
+
+    def _c(key):
+        """Return a fresh copy of the 7-element coefficient array for key."""
+        return data[key].flatten()[:7].copy()
+
+    # ── Gas phase: no corrections (gas species are unaffected by LSR/strain) ──
+    nasa_gas = {
+        "N2":  {"low": _c("A_N2_l"),  "high": _c("A_N2_h"),  "T_break": 791.5},
+        "H2":  {"low": _c("A_H2_l"),  "high": _c("A_H2_h"),  "T_break": 791.5},
+        "NH3": {"low": _c("A_NH3_l"), "high": _c("A_NH3_h"), "T_break": 592.4},
+    }
+
+    # ── Surface species: apply zero-strain corrections to a6 (idx 5) and a7 (idx 6)
+    #
+    # At strain=0 and A6_LSR=0 (Q_target=Q_ref), SeqSim's amm_thermo4 does:
+    #   A6_Correction = A6_LSR - A6_Strain = 0 - A6_Strain  →  a6 += A6_Strain
+    #   a7 += A7_Strain
+    # where A6_Strain = Strain_Coef_H @ [0, 1]  (second column of the matrix)
+    #       A7_Strain = Strain_Coef_S @ [0, 0, 1]  (third column)
+    #
+    # Correction index → surface species (SeqSim ordering, 13 species):
+    #   0-5 : N2(T), N(T), H(T), NH3(T), NH2(T), NH(T)
+    #   6-11: N2(S), N(S), H(S),  NH3(S), NH2(S), NH(S)
+    #   12  : N(SL)
+    A6_corr = (data['Strain_Coef_H'] @ np.array([0.0, 1.0]))        # (13,)
+    A7_corr = (data['Strain_Coef_S'] @ np.array([0.0, 0.0, 1.0]))   # (13,)
+
+    def _surf(key_l, key_h, ci):
+        """Build one corrected surface-species entry."""
+        low  = _c(key_l);  low[5]  += A6_corr[ci];  low[6]  += A7_corr[ci]
+        high = _c(key_h);  high[5] += A6_corr[ci];  high[6] += A7_corr[ci]
+        return {"low": low, "high": high, "T_break": 500.0}
+
+    nasa_surf = {
+        "N2(T)":  _surf("A_N2s1_l",  "A_N2s1_h",   0),
+        "N(T)":   _surf("A_Ns1_l",   "A_Ns1_h",    1),
+        "H(T)":   _surf("A_Hs1_l",   "A_Hs1_h",    2),
+        "NH3(T)": _surf("A_NH3s1_l", "A_NH3s1_h",  3),
+        "NH2(T)": _surf("A_NH2s1_l", "A_NH2s1_h",  4),
+        "NH(T)":  _surf("A_NHs1_l",  "A_NHs1_h",   5),
+        "N2(S)":  _surf("A_N2s2_l",  "A_N2s2_h",   6),
+        "N(S)":   _surf("A_Ns2_l",   "A_Ns2_h",    7),
+        "H(S)":   _surf("A_Hs2_l",   "A_Hs2_h",    8),
+        "NH3(S)": _surf("A_NH3s2_l", "A_NH3s2_h",  9),
+        "NH2(S)": _surf("A_NH2s2_l", "A_NH2s2_h", 10),
+        "NH(S)":  _surf("A_NHs2_l",  "A_NHs2_h",  11),
+        "N(SL)":  _surf("A_Ns3_l",   "A_Ns3_h",   12),
+    }
+
+    return nasa_gas, nasa_surf
 
 
 def read_kinetic_params(excel_path):
