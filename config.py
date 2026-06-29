@@ -253,20 +253,15 @@ COLD_START_T   = 593.0   # K — temperature for the cold-start diagnostic run
 # ==============================================================================
 
 # Individual species volumetric flow rates at standard conditions [cm³/s].
-# H2 = 34.2 sccm, N2 = 11.4 sccm  →  total = 45.6 sccm = 0.76 cm³/s
-# (1 sccm = 1 cm³/min  →  divide by 60 to convert to cm³/s)
-Q_H2_SCCM = 34.2                         # cm³/min (sccm)
-Q_N2_SCCM = 11.4                         # cm³/min (sccm)
-Q_IN      = (Q_H2_SCCM + Q_N2_SCCM) / 60.0   # cm³/s  total inlet flow
-Q_OUT     = Q_IN                         # cm³/s  outlet = inlet (isobaric)
+# Matched to SeqSim: V = 1 cm³, Q_total = 1 cm³/s → τ = V/Q = 1 s.
+# Feed composition kept at 3:1 H2:N2 (x_N2 = 0.25, x_H2 = 0.75).
+Q_IN  = 1.0    # cm³/s  total inlet flow  (SeqSim: Q = 1 cm³/s)
+Q_OUT = Q_IN   # cm³/s  outlet = inlet (isobaric)
 
 # Reactor volume [cm³]
-V_REACTOR = 7.7   # cm³
+V_REACTOR = 1.0   # cm³  (SeqSim: V = 1 cm³  →  τ = 1 s)
 
-# Feed mole fractions derived from the flow rates above.
-# x_N2 = 11.4/45.6 = 0.25, x_H2 = 34.2/45.6 = 0.75, x_NH3 = 0.0
-# These are consistent with the 3:1 H2:N2 feed already used in the ICs.
-# Stored here for transparency; used in odes_rhs() to compute C_feed.
-X_N2_FEED  = Q_N2_SCCM / (Q_N2_SCCM + Q_H2_SCCM)   # 0.25
-X_H2_FEED  = Q_H2_SCCM / (Q_N2_SCCM + Q_H2_SCCM)   # 0.75
-X_NH3_FEED = 0.0                                      # no NH3 in feed
+# Feed mole fractions: 3:1 H2:N2, no NH3 — matches SeqSim feed composition.
+X_N2_FEED  = 0.25   # N2 mole fraction
+X_H2_FEED  = 0.75   # H2 mole fraction
+X_NH3_FEED = 0.0    # no NH3 in feed
