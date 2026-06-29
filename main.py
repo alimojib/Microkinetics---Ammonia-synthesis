@@ -380,12 +380,8 @@ if RUN_COLD_START:
     t_idx_cs = int(np.argmin(np.abs(T_ARR - COLD_START_T)))
     T_cs     = T_ARR[t_idx_cs]
 
-    # Fresh equilibrated surface — same as what the sweep uses at T_ARR[0]
-    y0_cs = build_equilibrated_initial_conditions(
-        T_cs,
-        kf_matrix[t_idx_cs, :],
-        kb_matrix[t_idx_cs, :],
-    )
+    # Clean surface (all coverages = 0) + feed gas — matches SeqSim's s0_zs exactly
+    y0_cs = build_initial_conditions(T_cs)
 
     C_total_cs = P_BAR / (R_CM3_BAR * T_cs)
     C_feed_cs  = np.array([
