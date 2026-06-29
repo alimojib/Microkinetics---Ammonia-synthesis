@@ -847,9 +847,9 @@ s0_zs[6] = ic.c_N2
 s0_zs[7] = ic.c_H2
 s0_zs[8] = ic.c_NH3
 
-options_zs = {'atol': 1e-12, 'rtol': 1e-10, 'first_step': 1e-10, 'max_step': 1e-3}
+options_zs = {'atol': 1e-12, 'rtol': 1e-10, 'first_step': 1e-10, 'max_step': 1e3}
 
-t0_zs, tf_zs = 0, 15
+t0_zs, tf_zs = 0, 1e6
 
 def ODEs_zero_strain_pbar(t, s, params, t_last):
     dydt = ODEs_zero_strain(t, s, params)
