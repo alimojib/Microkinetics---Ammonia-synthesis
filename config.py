@@ -236,6 +236,19 @@ SS_TOL = 1.0e-13   # mol/(cm²·s) or mol/(cm³·s)
 
 
 # ==============================================================================
+# COLD-START DIAGNOSTIC
+# ==============================================================================
+
+# When RUN_COLD_START = True, an extra ODE integration is run at COLD_START_T
+# using a fresh equilibrated surface (no warm-start inheritance from lower T).
+# The result is printed side-by-side with the warm-start value at the same T,
+# which reveals whether bistability or warm-start history causes differences
+# between main and SeqSim (SeqSim always starts cold).
+RUN_COLD_START = True
+COLD_START_T   = 593.0   # K — temperature for the cold-start diagnostic run
+
+
+# ==============================================================================
 # CSTR REACTOR OPERATING CONDITIONS
 # ==============================================================================
 

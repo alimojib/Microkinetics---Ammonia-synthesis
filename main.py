@@ -47,6 +47,8 @@ from config import (
     X_N2_FEED,      # feed mole fraction of N2
     X_H2_FEED,      # feed mole fraction of H2
     X_NH3_FEED,     # feed mole fraction of NH3
+    RUN_COLD_START,
+    COLD_START_T,
 )
 
 from data_io import (
@@ -359,6 +361,77 @@ for t_idx, T in enumerate(T_ARR):
 
 # Convert list of state vectors into a 2-D array: (n_temperatures × N_VARS)
 ss_array = np.array(ss_results)   # shape: (len(T_ARR), N_VARS)
+
+
+# ==============================================================================
+# STEP 8b — COLD-START DIAGNOSTIC (optional)
+# ==============================================================================
+#
+# Runs an extra integration at COLD_START_T starting from a fresh equilibrated
+# surface (no warm-start inheritance).  Prints a side-by-side comparison with
+# the warm-start result at the same temperature.
+#
+# Purpose: distinguish between two explanations for the SeqSim vs main gap —
+#   (a) warm-start traps main in a different steady-state basin (bistability)
+#   (b) SeqSim hasn't reached true steady state in its 15 s integration
+# If cold-start ≈ warm-start → explanation (b); if they differ → explanation (a).
+
+if RUN_COLD_START:
+    t_idx_cs = int(np.argmin(np.abs(T_ARR - COLD_START_T)))
+    T_cs     = T_ARR[t_idx_cs]
+
+    # Fresh equilibrated surface — same as what the sweep uses at T_ARR[0]
+    y0_cs = build_equilibrated_initial_conditions(
+        T_cs,
+        kf_matrix[t_idx_cs, :],
+        kb_matrix[t_idx_cs, :],
+    )
+
+    C_total_cs = P_BAR / (R_CM3_BAR * T_cs)
+    C_feed_cs  = np.array([
+        X_N2_FEED  * C_total_cs,
+        X_H2_FEED  * C_total_cs,
+        X_NH3_FEED * C_total_cs,
+    ])
+
+    print(f"\n── Cold-start run at T = {T_cs:.2f} K ({T_cs - 273.15:.1f} °C) ──")
+    sol_cs  = run_microkinetics(T_cs, kf_matrix[t_idx_cs, :], kb_matrix[t_idx_cs, :],
+                                C_feed_cs, y0_cs)
+    y_cs    = sol_cs.y[:, -1]
+    ss_cs   = sol_cs.success and sol_cs.t_events[0].size > 0
+    y_warm  = ss_array[t_idx_cs]
+
+    vac_T_cs, vac_S_cs     = compute_vacancies(y_cs)
+    vac_T_ws, vac_S_ws     = compute_vacancies(y_warm)
+
+    print(f"\n  {'Species':<10}  {'warm-start θ':>14}  {'cold-start θ':>14}")
+    print("  " + "-" * 42)
+    cs_cov = [
+        ("N2(T)",  y_warm[IDX_N2T],  y_cs[IDX_N2T],  SDEN_T),
+        ("N(T)",   y_warm[IDX_NT],   y_cs[IDX_NT],   SDEN_T),
+        ("H(T)",   y_warm[IDX_HT],   y_cs[IDX_HT],   SDEN_T),
+        ("NH3(T)", y_warm[IDX_NH3T], y_cs[IDX_NH3T], SDEN_T),
+        ("NH2(T)", y_warm[IDX_NH2T], y_cs[IDX_NH2T], SDEN_T),
+        ("NH(T)",  y_warm[IDX_NHT],  y_cs[IDX_NHT],  SDEN_T),
+        ("*(T)",   vac_T_ws,         vac_T_cs,        SDEN_T),
+        ("N(S)",   y_warm[IDX_NS],   y_cs[IDX_NS],   SDEN_S),
+        ("H(S)",   y_warm[IDX_HS],   y_cs[IDX_HS],   SDEN_S),
+        ("NH2(S)", y_warm[IDX_NH2S], y_cs[IDX_NH2S], SDEN_S),
+        ("NH(S)",  y_warm[IDX_NHS],  y_cs[IDX_NHS],  SDEN_S),
+        ("N(SL)",  y_warm[IDX_NSL],  y_cs[IDX_NSL],  SDEN_S),
+        ("*(S)",   vac_S_ws,         vac_S_cs,        SDEN_S),
+    ]
+    for sp_name, c_ws, c_cs, sden in cs_cov:
+        θ_ws = c_ws / sden if sden > 0 else 0.0
+        θ_cs = c_cs / sden if sden > 0 else 0.0
+        print(f"  {sp_name:<10}  {θ_ws:>14.6f}  {θ_cs:>14.6f}")
+
+    NH3_ws = y_warm[IDX_NH3G]
+    NH3_cs = y_cs[IDX_NH3G]
+    ratio  = NH3_cs / NH3_ws if NH3_ws > 0 else float("nan")
+    print(f"\n  {'NH3 (mol/cm³)':<10}  {NH3_ws:>14.4e}  {NH3_cs:>14.4e}")
+    print(f"  cold/warm ratio: {ratio:.3f}")
+    print(f"  cold-start SS fired: {ss_cs}  |  t_stop = {sol_cs.t[-1]:.3e} s")
 
 
 # ==============================================================================
